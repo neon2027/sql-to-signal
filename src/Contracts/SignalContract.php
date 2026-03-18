@@ -20,4 +20,22 @@ interface SignalContract
 
     /** @return array<string, mixed> */
     public function toArray(): array;
+
+    // ── Pagination ─────────────────────────────────────────────────────────────
+
+    public function isPaginated(): bool;
+
+    public function getTotal(): int;
+
+    public function getPerPage(): int;
+
+    public function getCurrentPage(): int;
+
+    public function getLastPage(): int;
+
+    public function nextPage(): static;
+
+    public function prevPage(): static;
+
+    public function goToPage(int $page): static;
 }
