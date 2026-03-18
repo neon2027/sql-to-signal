@@ -262,7 +262,8 @@ $signal->toArray();
 //   "meta" => [
 //     "count"            => 12,
 //     "model_class"      => "App\Models\Product",
-//     "polling_interval" => 5000,       // <-- overridden
+//     "polling_interval" => 5000,   // <-- overridden
+//     "pagination"       => null,   // null when not paginated
 //   ]
 // ]
 ```
@@ -321,7 +322,19 @@ class OrderDashboard extends Component
     "bindings":        ["pending"],
     "model_class":     "App\\Models\\Order",
     "connection_name": "mysql",
-    "config":          { "polling_interval": 2000, "max_rows": 1000 }
+    "config":          { "polling_interval": 2000, "max_rows": 1000 },
+    "pagination_meta": null
+}
+```
+
+For a paginated Signal, `pagination_meta` carries the full page state:
+
+```json
+{
+    "pagination_meta": {
+        "total": 87, "per_page": 15, "current_page": 2,
+        "last_page": 6, "from": 16, "to": 30
+    }
 }
 ```
 
@@ -380,19 +393,93 @@ setInterval(() => fetch('/orders').then(r => r.json()).then(d => signal = d),
 
 ---
 
+## Pagination
+
+Unlike Livewire's built-in `WithPagination` (which only works inside `render()`), Signal pagination works anywhere — including `mount()`.
+
+```php
+public function mount(): void
+{
+    $this->orders = Order::pending()
+        ->orderBy('created_at', 'desc')
+        ->toSignal(['per_page' => 15, 'page' => 1]);
+}
+
+public function nextPage(): void { $this->orders = $this->orders->nextPage(); }
+public function prevPage(): void { $this->orders = $this->orders->prevPage(); }
+public function goToPage(int $page): void { $this->orders = $this->orders->goToPage($page); }
+```
+
+```blade
+@foreach ($orders->getData() as $order)
+    <div>{{ $order->id }} — {{ $order->status }}</div>
+@endforeach
+
+<div>
+    Page {{ $orders->getCurrentPage() }} of {{ $orders->getLastPage() }}
+    &nbsp;·&nbsp; {{ $orders->getTotal() }} total
+</div>
+
+<button wire:click="prevPage" @disabled($orders->getCurrentPage() === 1)>← Prev</button>
+<button wire:click="nextPage" @disabled($orders->getCurrentPage() === $orders->getLastPage())>Next →</button>
+```
+
+Pagination meta is carried in `toArray()` and survives the Livewire wire round-trip:
+
+```json
+{
+    "data": [ ... ],
+    "meta": {
+        "count": 15,
+        "polling_interval": 2000,
+        "pagination": {
+            "total": 87,
+            "per_page": 15,
+            "current_page": 1,
+            "last_page": 6,
+            "from": 1,
+            "to": 15
+        }
+    }
+}
+```
+
+Pass it to Alpine.js for client-side pagination controls without any extra wiring:
+
+```blade
+<div x-data="{ signal: @js($orders) }">
+    <span x-text="`Page ${signal.meta.pagination.current_page} of ${signal.meta.pagination.last_page}`"></span>
+</div>
+```
+
+### Pagination API
+
+| Method | Return type | Description |
+|---|---|---|
+| `isPaginated()` | `bool` | `true` when created with `per_page` |
+| `getTotal()` | `int` | Total rows across all pages |
+| `getPerPage()` | `int` | Rows per page |
+| `getCurrentPage()` | `int` | Current page number |
+| `getLastPage()` | `int` | Last page number |
+| `nextPage()` | `Signal` | Signal for the next page (clamped at last page) |
+| `prevPage()` | `Signal` | Signal for the previous page (clamped at page 1) |
+| `goToPage(int $page)` | `Signal` | Signal for an arbitrary page |
+
+---
+
 ## Signal API
 
 | Method | Return type | Description |
 |---|---|---|
-| `getData()` | `Collection` | Full result set |
-| `getQuery()` | `string` | Raw SQL with `?` placeholders |
+| `getData()` | `Collection` | Full result set for the current page |
+| `getQuery()` | `string` | Base SQL with `?` placeholders (no LIMIT/OFFSET) |
 | `getBindings()` | `array` | Ordered binding values |
 | `getModelClass()` | `string\|null` | Eloquent model class, or `null` for raw queries |
 | `getConnectionName()` | `string\|null` | Database connection name |
-| `refresh()` | `Signal` | Re-runs the query, returns a fresh `Signal` |
-| `count()` | `int` | Row count |
-| `isEmpty()` | `bool` | `true` when result set is empty |
-| `first()` | `mixed` | First row/model, or `null` |
+| `refresh()` | `Signal` | Re-runs the query; re-runs the same page if paginated |
+| `count()` | `int` | Row count for the current page |
+| `isEmpty()` | `bool` | `true` when the current page is empty |
+| `first()` | `mixed` | First row/model on the current page, or `null` |
 | `pluck(key, value?)` | `Collection` | Delegates to `Collection::pluck()` |
 | `toArray()` | `array` | `['data' => [...], 'meta' => [...]]` |
 | `toLivewire()` | `array` | Full serialized payload for Livewire transport |
