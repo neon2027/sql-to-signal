@@ -8,6 +8,152 @@ $signal = User::where('active', true)->toSignal();
 
 ---
 
+## Why not just `clone $query`?
+
+The clone pattern is the typical workaround when you need to reuse a query builder — but it falls apart quickly in Livewire and Alpine.js contexts.
+
+### Reusing a query in a Livewire component
+
+**Without `toSignal()` — clone pattern**
+
+```php
+class OrderDashboard extends Component
+{
+    // You can't store a QueryBuilder as a public property.
+    // Livewire can't serialize it — it will throw or silently drop it.
+    // So you have to rebuild the query from scratch on every request.
+
+    public array $orders = [];    // you lose Collection methods
+    public int   $count  = 0;
+    public ?array $first = null;
+
+    private function baseQuery(): Builder
+    {
+        // Duplicated every time: if filters change you must update in multiple places
+        return DB::table('orders')
+            ->where('status', $this->status)
+            ->where('user_id', auth()->id())
+            ->orderBy('created_at', 'desc');
+    }
+
+    public function mount(): void
+    {
+        $q = $this->baseQuery();
+        $this->orders = $q->get()->toArray();       // hit 1
+        $this->count  = (clone $q)->count();        // hit 2  ← extra query
+        $this->first  = (clone $q)->first();        // hit 3  ← extra query
+    }
+
+    public function refresh(): void
+    {
+        // Rebuild everything again — same 3 queries
+        $q = $this->baseQuery();
+        $this->orders = $q->get()->toArray();
+        $this->count  = (clone $q)->count();
+        $this->first  = (clone $q)->first();
+    }
+}
+```
+
+Problems:
+- `clone` only works within the same request — you can't put a `Builder` in a Livewire property
+- The query definition is repeated or called through a private helper — easy to drift out of sync
+- 3 separate database hits to get the same data
+- `toArray()` discards the model — you get raw stdClass, no Eloquent methods on rows
+
+---
+
+**With `toSignal()`**
+
+```php
+class OrderDashboard extends Component
+{
+    public Signal $orders;  // serializes/hydrates automatically between requests
+
+    public function mount(): void
+    {
+        // One query, one database hit. count/first/pluck come for free.
+        $this->orders = DB::table('orders')
+            ->where('status', $this->status)
+            ->where('user_id', auth()->id())
+            ->orderBy('created_at', 'desc')
+            ->toSignal();
+    }
+
+    public function refresh(): void
+    {
+        // Re-runs the exact same SQL — no need to rebuild the query
+        $this->orders = $this->orders->refresh();
+    }
+}
+```
+
+```blade
+Total: {{ $orders->count() }}        {{-- no extra query --}}
+First: {{ $orders->first()->id }}    {{-- no extra query --}}
+```
+
+---
+
+### Passing data to Alpine.js
+
+**Without `toSignal()`**
+
+```php
+// Controller / Livewire component
+$rows     = DB::table('orders')->where(...)->get()->toArray();
+$count    = DB::table('orders')->where(...)->count();   // cloned query, second hit
+$interval = config('dashboard.polling_interval');       // manually forwarded
+
+return view('dashboard', compact('rows', 'count', 'interval'));
+```
+
+```blade
+<div x-data="{
+    rows:     {{ json_encode($rows) }},
+    count:    {{ $count }},
+    interval: {{ $interval }}
+}">
+```
+
+Gotchas:
+- Two database hits for the same filter
+- You manually `json_encode` each piece
+- Polling interval is a magic number hard to change in one place
+- No single object you can pass to a sub-component or an API response
+
+---
+
+**With `toSignal()`**
+
+```php
+$signal = DB::table('orders')->where(...)->toSignal();
+
+return view('dashboard', compact('signal'));
+```
+
+```blade
+<div x-data="{ signal: @js($signal) }">
+    {{-- signal.data, signal.meta.count, signal.meta.polling_interval --}}
+    {{-- all in one place, one query, zero manual wiring --}}
+</div>
+```
+
+---
+
+### Summary
+
+| | `clone $query` | `->toSignal()` |
+|---|---|---|
+| Survives Livewire serialization | No — Builder can't be a public property | Yes — Signal hydrates/dehydrates cleanly |
+| Database hits for count + first | Extra query each | Zero — derived from the same Collection |
+| Refresh in Livewire | Rebuild query from scratch | `$signal->refresh()` |
+| Alpine.js wiring | Manual `json_encode` per variable | `@js($signal)` — data + meta in one shot |
+| Model hydration on refresh | Lost — raw `stdClass` | Preserved — Eloquent models rebuilt |
+| Polling interval in sync | Hard-coded in JS | Carried in `signal.meta.polling_interval` |
+
+---
+
 ## Requirements
 
 - PHP 8.2+
