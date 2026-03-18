@@ -53,13 +53,31 @@ final class Signal implements JsonSerializable, SignalContract
 
     public function refresh(): static
     {
+        // Security: only allow connections explicitly defined in database config,
+        // preventing an attacker from switching to an unintended database via a
+        // tampered Livewire payload.
+        $allowedConnections = array_keys(config('database.connections', []));
+
+        if ($this->connectionName !== null && ! in_array($this->connectionName, $allowedConnections, true)) {
+            throw new \InvalidArgumentException(
+                "Signal::refresh() refused an unknown connection name: [{$this->connectionName}]."
+            );
+        }
+
         $connection = $this->connectionName
             ? DB::connection($this->connectionName)
             : DB::connection();
 
         $rows = $connection->select($this->query, $this->bindings);
 
-        if ($this->modelClass !== null && class_exists($this->modelClass)) {
+        // Security: only instantiate classes that are genuine Eloquent models,
+        // preventing a tampered model_class payload from invoking arbitrary
+        // PHP class constructors on the server.
+        if (
+            $this->modelClass !== null
+            && class_exists($this->modelClass)
+            && is_subclass_of($this->modelClass, Model::class)
+        ) {
             /** @var Model $model */
             $model = new $this->modelClass;
             $data = collect($rows)->map(fn ($row) => $model->newFromBuilder((array) $row));
