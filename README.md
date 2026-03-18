@@ -65,6 +65,23 @@ $signal = DB::table('orders')
     ->where('status', 'pending')
     ->orderBy('created_at', 'desc')
     ->toSignal();
+
+// $signal is a Signal instance
+$signal->getQuery();
+// "select * from `orders` where `status` = ? order by `created_at` desc"
+
+$signal->getBindings();
+// ["pending"]
+
+$signal->count();
+// 3
+
+$signal->getData();
+// Illuminate\Support\Collection {
+//   0 => { "id": 1, "status": "pending", "total": 120.00, ... },
+//   1 => { "id": 2, "status": "pending", "total": 89.50,  ... },
+//   2 => { "id": 3, "status": "pending", "total": 45.00,  ... },
+// }
 ```
 
 ### Eloquent Builder
@@ -74,6 +91,15 @@ $signal = Order::query()
     ->with('customer')
     ->where('status', 'pending')
     ->toSignal();
+
+$signal->getModelClass();
+// "App\Models\Order"
+
+$signal->first();
+// App\Models\Order { #id: 1, #status: "pending", ... }
+
+$signal->pluck('total');
+// Illuminate\Support\Collection [120.00, 89.50, 45.00]
 ```
 
 ### Override config per call
@@ -83,6 +109,16 @@ $signal = Product::active()->toSignal([
     'polling_interval' => 5000,
     'max_rows'         => 50,
 ]);
+
+$signal->toArray();
+// [
+//   "data" => [ ... up to 50 products ... ],
+//   "meta" => [
+//     "count"            => 12,
+//     "model_class"      => "App\Models\Product",
+//     "polling_interval" => 5000,       // <-- overridden
+//   ]
+// ]
 ```
 
 ---
@@ -107,6 +143,8 @@ class OrderDashboard extends Component
     public function refresh(): void
     {
         $this->orders = $this->orders->refresh();
+        // Re-runs the original SQL with the same bindings.
+        // No need to rebuild the query from scratch.
     }
 
     public function render()
@@ -128,15 +166,32 @@ class OrderDashboard extends Component
 </div>
 ```
 
+**What Livewire sends over the wire** (dehydrated payload):
+
+```json
+{
+    "data":            [{ "id": 1, "status": "pending" }, ...],
+    "query":           "select * from `orders` where `status` = ?",
+    "bindings":        ["pending"],
+    "model_class":     "App\\Models\\Order",
+    "connection_name": "mysql",
+    "config":          { "polling_interval": 2000, "max_rows": 1000 }
+}
+```
+
+On the next request Livewire hydrates this back into a full `Signal` — no database hit until you call `refresh()`.
+
 ### Auto-polling with Livewire
 
 ```blade
 <div wire:poll.5000ms="refresh">
     @foreach ($orders->getData() as $order)
-        ...
+        <div>{{ $order->id }} — {{ $order->status }}</div>
     @endforeach
 </div>
 ```
+
+Every 5 seconds Livewire calls `refresh()`, re-executes the query, and re-renders only the changed rows.
 
 ---
 
@@ -153,39 +208,49 @@ class OrderDashboard extends Component
 </div>
 ```
 
-JSON shape:
+`@js($orders)` renders:
 
 ```json
 {
     "data": [
-        { "id": 1, "status": "pending" }
+        { "id": 1, "status": "pending", "total": "120.00" },
+        { "id": 2, "status": "pending", "total": "89.50"  },
+        { "id": 3, "status": "pending", "total": "45.00"  }
     ],
     "meta": {
-        "count": 1,
-        "model_class": "App\\Models\\Order",
+        "count":            3,
+        "model_class":      "App\\Models\\Order",
         "polling_interval": 2000
     }
 }
+```
+
+Use `signal.meta.polling_interval` to drive a JS polling interval without hard-coding it:
+
+```js
+setInterval(() => fetch('/orders').then(r => r.json()).then(d => signal = d),
+            signal.meta.polling_interval);
 ```
 
 ---
 
 ## Signal API
 
-| Method | Description |
-|---|---|
-| `getData()` | Returns the result set as a `Collection` |
-| `getQuery()` | Returns the raw SQL string |
-| `getBindings()` | Returns the query bindings array |
-| `getModelClass()` | Returns the Eloquent model class, or `null` for raw queries |
-| `refresh()` | Re-executes the stored query and returns a new `Signal` |
-| `count()` | Number of rows |
-| `isEmpty()` | `true` if the result set is empty |
-| `first()` | First item in the result set |
-| `pluck(key, value?)` | Delegates to `Collection::pluck()` |
-| `toArray()` | Returns `['data' => [...], 'meta' => [...]]` |
-| `toLivewire()` | Serializes the Signal for Livewire transport |
-| `Signal::fromLivewire($value)` | Reconstructs a Signal from Livewire payload |
+| Method | Return type | Description |
+|---|---|---|
+| `getData()` | `Collection` | Full result set |
+| `getQuery()` | `string` | Raw SQL with `?` placeholders |
+| `getBindings()` | `array` | Ordered binding values |
+| `getModelClass()` | `string\|null` | Eloquent model class, or `null` for raw queries |
+| `getConnectionName()` | `string\|null` | Database connection name |
+| `refresh()` | `Signal` | Re-runs the query, returns a fresh `Signal` |
+| `count()` | `int` | Row count |
+| `isEmpty()` | `bool` | `true` when result set is empty |
+| `first()` | `mixed` | First row/model, or `null` |
+| `pluck(key, value?)` | `Collection` | Delegates to `Collection::pluck()` |
+| `toArray()` | `array` | `['data' => [...], 'meta' => [...]]` |
+| `toLivewire()` | `array` | Full serialized payload for Livewire transport |
+| `Signal::fromLivewire($value)` | `Signal` | Reconstructs a `Signal` from a Livewire payload |
 
 ---
 
@@ -194,11 +259,22 @@ JSON shape:
 To prevent accidentally serializing large datasets through Livewire's JSON cycle, an `OverflowException` is thrown when the result count exceeds `max_rows`:
 
 ```php
-// Throws OverflowException if more than 500 rows are returned
+// Table has 1 500 rows — this throws immediately
 $signal = Report::query()->toSignal(['max_rows' => 500]);
+
+// OverflowException: Signal result set exceeds the configured max_rows limit
+// of 500. Got 1500 rows.
 ```
 
-Set `max_rows` to `null` to disable the limit.
+Scope your query before calling `toSignal()`, or set `max_rows` to `null` to disable the limit entirely:
+
+```php
+// Safe — scoped
+$signal = Report::thisMonth()->toSignal(['max_rows' => 500]);
+
+// Unlimited — use with care
+$signal = Report::query()->toSignal(['max_rows' => null]);
+```
 
 ---
 
