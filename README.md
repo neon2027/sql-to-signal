@@ -511,8 +511,7 @@ $signal = Report::query()->toSignal(['max_rows' => null]);
 
 ---
 
-[![Ko-fi](https://shields.io)]
-[![Support me on Ko-fi](https://ko-fi.com)](https://ko-fi.com/exequiellustan)
+[![Support me on Ko-fi](https://ko-fi.com)](https://ko-fi.com)
 
 ## License
 
